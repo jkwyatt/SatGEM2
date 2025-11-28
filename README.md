@@ -2,7 +2,7 @@
 A code repository for the creation of SatGEM2. 
 
 ## SatGEM_DIY
-shows how to create your own T,S Gamma fields using the SatGEM-2 code.
+Allows the construction of your own SatGEM fields from a SSH field. Note, that the copernicus data is daily, so its recommended to chunk this up otherwise data output will be very large. 
 
 ## Watermass
 Currently, the script for the creation of the figures is avaialable here. 
