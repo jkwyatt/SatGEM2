@@ -1,0 +1,24 @@
+# Ignore NetCDF and large binary data
+*.nc
+*.npz
+*.npy
+*.mat
+
+# GEM & lookup tables
+ts_gem_fields/
+gamma_gem_fields/
+GEM_FIELDS_SEASONAL/
+ADT_DYNM/
+data/
+output/
+scratch/
+tmp/
+
+# Jupyter + Python noise
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# OS / editor files
+.DS_Store
+Thumbs.db
