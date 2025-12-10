@@ -66,41 +66,60 @@ def _subset_vars(GEM, vars_to_keep):
     return GEM[present]
 
 
-def _open_gem_as_adt_nointerp(lon_int, gem_all, lut_dir, vars_to_keep, month_da=None):
+def _open_gem_as_adt_nointerp(lon_int, gem_all, lut_all, vars_to_keep, month_da=None):
     """
     Select one longitude slice from a combined GEM dataset and
-    use the corresponding LUT dynm_to_adt_{lon}.nc to swap 'dyn_m' -> 'adt'.
+    use the corresponding LUT (single file with dims like dyn_m, longitude)
+    to swap 'dyn_m' -> 'adt'.
 
+    Parameters
+    ----------
+    lon_int : int
+        Integer longitude ([-180, 180]) for this "post".
     gem_all : xr.Dataset
         Combined GEM dataset with longitude, month, dyn_m, ...
-    lut_dir : str
-        Directory containing dynm_to_adt_{lon}.nc
+    lut_all : xr.Dataset
+        Single LUT dataset with the dyn_m ↔ adt relationship for ALL longitudes.
+        Expected to have at least dims ('dyn_m', 'longitude') and variables
+        'dyn_m' and 'adt'.
+    vars_to_keep : list of str or None
+        Variables to retain from GEM.
+    month_da : xr.DataArray or None
+        Optional month indexer (1–12) with a 'time' dimension.
     """
-    # LUT path for this longitude
-    lp = os.path.join(lut_dir, f"dynm_to_adt_{lon_int}.nc")
-    if not os.path.exists(lp):
+    # Basic checks
+    if "longitude" not in gem_all.coords or "longitude" not in lut_all.coords:
         return None
 
-    # Select this longitude from the combined GEM dataset
-    if "longitude" not in gem_all.coords:
-        return None
-
-    # exact match; if you want nearest, add method="nearest"
+    # Select this longitude from GEM (exact integer match)
     try:
         GEM = gem_all.sel(longitude=lon_int)
     except KeyError:
         return None
 
-    LUT = xr.open_dataset(lp)
+    # Select this longitude from LUT
+    try:
+        LUT = lut_all.sel(longitude=lon_int)
+    except KeyError:
+        return None
 
     dyn_m = LUT["dyn_m"]
     adt1d = LUT["adt"]
 
     # Handle case where LUT has one more dyn_m point than GEM
     if "dyn_m" in GEM.dims and dyn_m.size > GEM.dims["dyn_m"]:
-        dyn_m = dyn_m[:-1]
-        adt1d = adt1d[:-1]
+        dyn_m = dyn_m.isel(dyn_m=slice(0, GEM.dims["dyn_m"]))
+        adt1d = adt1d.isel(dyn_m=slice(0, GEM.dims["dyn_m"]))
 
+    # Make sure dyn_m, adt1d are 1D along 'dyn_m'
+    if dyn_m.ndim != 1:
+        # collapse any extra dims except 'dyn_m' (if they exist)
+        for extra_dim in dyn_m.dims:
+            if extra_dim != "dyn_m":
+                dyn_m = dyn_m.isel({extra_dim: 0})
+                adt1d = adt1d.isel({extra_dim: 0})
+
+    # Assign dyn_m coord and swap to adt dimension
     GEM = GEM.assign_coords(dyn_m=("dyn_m", dyn_m.data))
     GEM = GEM.assign_coords(adt=("dyn_m", adt1d.data)).swap_dims({"dyn_m": "adt"})
 
@@ -120,6 +139,7 @@ def _open_gem_as_adt_nointerp(lon_int, gem_all, lut_dir, vars_to_keep, month_da=
     return GEM
 
 
+
 # -------------------------------------------------------------------
 # Main public function
 # -------------------------------------------------------------------
@@ -130,48 +150,11 @@ def create_bgc_satGEM(
     lat_min,
     lat_max,
     gem_path,
-    lut_dir,
+    lut_path,   # <--- was lut_dir
     dataset_id="c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D",
     vars_to_keep=None,
 ):
-    """
-    Build a BGC SatGEM field by sampling seasonal GEM fields using
-    Copernicus ADT over a specified region and time period.
-
-    Parameters
-    ----------
-    dates : tuple or list
-        (start_datetime, end_datetime), e.g. ("2020-01-30", "2020-03-01")
-        Anything acceptable to copernicusmarine.open_dataset.
-    lon_min, lon_max : float
-        Longitude bounds (degE) for SSH query to Copernicus.
-    lat_min, lat_max : float
-        Latitude bounds (degN) for SSH query to Copernicus.
-    gem_path : str or Path
-        Path or URL to combined seasonal GEM file, e.g.
-        'gem_seasonal_all.nc' or
-        'https://zenodo.org/records/17824264/files/gem_seasonal_all.nc?download=1'
-    lut_dir : str
-        Path to directory containing dynm_to_adt_{lon}.nc files
-        (e.g. '/g/data/jk72/jw2777/BGC_GLOBAL/DATA/ADT_DYNM/').
-    dataset_id : str, optional
-        Copernicus Marine dataset ID (daily DUACS 0.25° by default).
-    vars_to_keep : list of str or None, optional
-        Names of variables to retain from GEM files. If None, keep all.
-
-    Returns
-    -------
-    satGEM_field : xarray.Dataset
-        Dataset on the Copernicus grid (time, latitude, longitude, pressure, ...)
-        with selected variables (e.g. CT, SA, sigma, DOXY, nitrate) sampled
-        from the seasonal GEMs.
-    """
-    start_datetime, end_datetime = dates
-
-    # Default set of GEM variables if none specified
-    if vars_to_keep is None:
-        vars_to_keep = ["CT", "SA", "sigma", "doxy", "nitrate"]
-
+    ...
     # ---------------------------------------------------------------
     # 0. Open the combined GEM file (local path OR Zenodo URL)
     # ---------------------------------------------------------------
@@ -182,6 +165,18 @@ def create_bgc_satGEM(
     if "longitude" in gem_all.coords:
         gem_all = gem_all.assign_coords(
             longitude=np.vectorize(_to_180)(gem_all.longitude.values)
+        ).sortby("longitude")
+
+    # ---------------------------------------------------------------
+    # 0b. Open the single LUT file (local or URL)
+    # ---------------------------------------------------------------
+    lut_path = resolve_path(lut_path)
+    lut_all = xr.open_dataset(lut_path)
+
+    # Make sure LUT longitudes are also in [-180, 180]
+    if "longitude" in lut_all.coords:
+        lut_all = lut_all.assign_coords(
+            longitude=np.vectorize(_to_180)(lut_all.longitude.values)
         ).sortby("longitude")
 
     # ---------------------------------------------------------------
@@ -198,7 +193,7 @@ def create_bgc_satGEM(
         end_datetime=end_datetime,
     )
 
-    ds_SO = ssh["adt"]  # DataArray: time × lat × lon
+    ds_SO = ssh["adt"] # DataArray: time × lat × lon
 
     # ---------------------------------------------------------------
     # 2. Group longitude columns into "posts" k = floor(lon_180)
@@ -229,10 +224,16 @@ def create_bgc_satGEM(
         if "time" in cop_tile.dims:
             month_da = cop_tile["time"].dt.month
 
-        # Open the three posts, with month selection if available
-        Gc = _open_gem_as_adt_nointerp(k,                gem_all, lut_dir, vars_to_keep, month_da=month_da)
-        Gw = _open_gem_as_adt_nointerp(_wrap180_int(k-1), gem_all, lut_dir, vars_to_keep, month_da=month_da)
-        Ge = _open_gem_as_adt_nointerp(_wrap180_int(k+1), gem_all, lut_dir, vars_to_keep, month_da=month_da)
+                # Open the three posts, with month selection if available
+        Gc = _open_gem_as_adt_nointerp(
+            k, gem_all, lut_all, vars_to_keep, month_da=month_da
+        )
+        Gw = _open_gem_as_adt_nointerp(
+            _wrap180_int(k - 1), gem_all, lut_all, vars_to_keep, month_da=month_da
+        )
+        Ge = _open_gem_as_adt_nointerp(
+            _wrap180_int(k + 1), gem_all, lut_all, vars_to_keep, month_da=month_da
+        )
 
         if Gc is None and Gw is None and Ge is None:
             print(f"  -> Skipping {k} (no usable GEMs)")
