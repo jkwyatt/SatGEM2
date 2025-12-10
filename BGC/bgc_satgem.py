@@ -154,7 +154,18 @@ def create_bgc_satGEM(
     dataset_id="c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D",
     vars_to_keep=None,
 ):
-    ...
+    """ Build a BGC SatGEM field by sampling seasonal GEM fields using Copernicus ADT over a specified region and time period. 
+    Parameters ---------- 
+    dates : tuple or list (start_datetime, end_datetime), e.g. ("2020-01-30", "2020-03-01") Anything acceptable to copernicusmarine.open_dataset. 
+    lon_min, lon_max : float Longitude bounds (degE) for SSH query to Copernicus. 
+    lat_min, lat_max : float Latitude bounds (degN) for SSH query to Copernicus. 
+    gem_path : str or Path Path or URL to combined seasonal GEM file, e.g. 'gem_seasonal_all.nc' or 'https://zenodo.org/records/17824264/files/gem_seasonal_all.nc?download=1' 
+    lut_path : str Path to file containing dynm_to_adt_{lon}.nc files (e.g. '/g/data/jk72/jw2777/BGC_GLOBAL/DATA/ADT_DYNM/'). 
+    dataset_id : str, optional Copernicus Marine dataset ID (daily DUACS 0.25° by default). 
+    vars_to_keep : list of str or None, optional Names of variables to retain from GEM files. If None, keep all. 
+    Returns ------- 
+    satGEM_field : xarray.Dataset Dataset on the Copernicus grid (time, latitude, longitude, pressure, ...) with selected variables (e.g. CT, SA, sigma, DOXY, nitrate) sampled from the seasonal GEMs. """ 
+    start_datetime, end_datetime = dates # Default set of GEM variables if none specified if vars_to_keep is None: vars_to_keep = ["CT", "SA", "sigma", "doxy", "nitrate"]
     # ---------------------------------------------------------------
     # 0. Open the combined GEM file (local path OR Zenodo URL)
     # ---------------------------------------------------------------
