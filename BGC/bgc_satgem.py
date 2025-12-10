@@ -90,18 +90,27 @@ def _open_gem_as_adt_nointerp(lon_int, gem_all, lut_all, vars_to_keep, month_da=
     # Basic checks
     if "longitude" not in gem_all.coords or "longitude" not in lut_all.coords:
         return None
-
+    
     # Select this longitude from GEM (exact integer match)
     try:
         GEM = gem_all.sel(longitude=lon_int)
     except KeyError:
-        return None
-
+        # optional: fall back to nearest if needed
+        try:
+            GEM = gem_all.sel(longitude=lon_int, method="nearest")
+        except Exception:
+            return None
+    
     # Select this longitude from LUT
     try:
         LUT = lut_all.sel(longitude=lon_int)
     except KeyError:
-        return None
+        # optional: fall back to nearest
+        try:
+            LUT = lut_all.sel(longitude=lon_int, method="nearest")
+        except Exception:
+            return None
+
 
     dyn_m = LUT["dyn_m"]
     adt1d = LUT["adt"]
@@ -181,14 +190,20 @@ def create_bgc_satGEM(
     # ---------------------------------------------------------------
     # 0b. Open the single LUT file (local or URL)
     # ---------------------------------------------------------------
+    # 0b. Open the single LUT file (local or URL)
     lut_path = resolve_path(lut_path)
     lut_all = xr.open_dataset(lut_path)
-
+    
+    # --- rename 'lon' -> 'longitude' if needed ---
+    if "lon" in lut_all.coords and "longitude" not in lut_all.coords:
+        lut_all = lut_all.rename({"lon": "longitude"})
+    
     # Make sure LUT longitudes are also in [-180, 180]
     if "longitude" in lut_all.coords:
         lut_all = lut_all.assign_coords(
             longitude=np.vectorize(_to_180)(lut_all.longitude.values)
         ).sortby("longitude")
+
 
     # ---------------------------------------------------------------
     # 1. Get SSH from Copernicus over requested region / time
@@ -256,18 +271,29 @@ def create_bgc_satGEM(
         samples = []
         weights = []
 
+        def _drop_scalar_lon(ds):
+            if "longitude" in ds.coords and "longitude" not in ds.dims:
+                ds = ds.reset_coords("longitude", drop=True)
+            return ds
+
         if Gw is not None:
-            S_w = Gw.sel(adt=cop_tile, method="nearest")
+            Gw_clean = _drop_scalar_lon(Gw)
+            S_w = Gw_clean.sel(adt=cop_tile, method="nearest")
             samples.append(S_w)
             weights.append(0.25)
+        
         if Gc is not None:
-            S_c = Gc.sel(adt=cop_tile, method="nearest")
+            Gc_clean = _drop_scalar_lon(Gc)
+            S_c = Gc_clean.sel(adt=cop_tile, method="nearest")
             samples.append(S_c)
             weights.append(0.5)
+        
         if Ge is not None:
-            S_e = Ge.sel(adt=cop_tile, method="nearest")
+            Ge_clean = _drop_scalar_lon(Ge)
+            S_e = Ge_clean.sel(adt=cop_tile, method="nearest")
             samples.append(S_e)
             weights.append(0.25)
+
 
         w = np.array(weights, float)
         w /= w.sum()  # renormalize if any neighbor missing
