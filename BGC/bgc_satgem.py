@@ -355,7 +355,7 @@ def create_bgc_satGEM(
 
 
 
-    def create_bgc_satGEM_from_other_ssh(
+def create_bgc_satGEM_from_other_ssh(
     ssh_source,
     gem_path,
     lut_path,
