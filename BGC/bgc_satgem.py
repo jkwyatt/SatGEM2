@@ -159,10 +159,13 @@ def create_bgc_satGEM(
     lat_min,
     lat_max,
     gem_path,
-    lut_path,   # <--- was lut_dir
+    lut_path,
     dataset_id="c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D",
     vars_to_keep=None,
+    pmin=None,          # NEW
+    pmax=None,          # NEW
 ):
+
     """ Build a BGC SatGEM field by sampling seasonal GEM fields using Copernicus ADT over a specified region and time period. 
     Parameters ---------- 
     dates : tuple or list (start_datetime, end_datetime), e.g. ("2020-01-30", "2020-03-01") Anything acceptable to copernicusmarine.open_dataset. 
@@ -172,14 +175,42 @@ def create_bgc_satGEM(
     lut_path : str Path to file containing dynm_to_adt_{lon}.nc files (e.g. '/g/data/jk72/jw2777/BGC_GLOBAL/DATA/ADT_DYNM/'). 
     dataset_id : str, optional Copernicus Marine dataset ID (daily DUACS 0.25° by default). 
     vars_to_keep : list of str or None, optional Names of variables to retain from GEM files. If None, keep all. 
+    pmin, pmax : float or None, optional. Minimum and maximum pressure (dbar) to retain from the GEM fields. If None, the full pressure range of the GEM is used.
+
     Returns ------- 
     satGEM_field : xarray.Dataset Dataset on the Copernicus grid (time, latitude, longitude, pressure, ...) with selected variables (e.g. CT, SA, sigma, DOXY, nitrate) sampled from the seasonal GEMs. """ 
+    
+    
     start_datetime, end_datetime = dates # Default set of GEM variables if none specified if vars_to_keep is None: vars_to_keep = ["CT", "SA", "sigma", "doxy", "nitrate"]
     # ---------------------------------------------------------------
     # 0. Open the combined GEM file (local path OR Zenodo URL)
     # ---------------------------------------------------------------
     gem_path = resolve_path(gem_path)
     gem_all = xr.open_dataset(gem_path)
+    
+    # ---------------------------------------------------------------
+    # Optional pressure subsetting
+    # ---------------------------------------------------------------
+    if (pmin is not None) or (pmax is not None):
+    
+        # Identify the vertical coordinate name
+        if "pressure" in gem_all.coords:
+            pcoord = "pressure"
+        elif "pres" in gem_all.coords:
+            pcoord = "pres"
+        elif "p" in gem_all.coords:
+            pcoord = "p"
+        else:
+            raise ValueError(
+                "Could not find a pressure coordinate in GEM dataset "
+                "(expected 'pressure', 'pres', or 'p')."
+            )
+    
+        # Build slice safely
+        pmin_ = pmin if pmin is not None else gem_all[pcoord].min().item()
+        pmax_ = pmax if pmax is not None else gem_all[pcoord].max().item()
+    
+        gem_all = gem_all.sel({pcoord: slice(pmin_, pmax_)})
 
     # Ensure longitudes are in [-180, 180] to match k = floor(lon_180)
     if "longitude" in gem_all.coords:
