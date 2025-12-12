@@ -352,3 +352,209 @@ def create_bgc_satGEM(
     satGEM_field = xr.concat(tiles, dim="longitude").sortby("longitude")
 
     return satGEM_field
+
+
+
+    def create_bgc_satGEM_from_other_ssh(
+    ssh_source,
+    gem_path,
+    lut_path,
+    ssh_var="adt",
+    dates=None,                 # optional: ("YYYY-MM-DD", "YYYY-MM-DD")
+    lon_min=None, lon_max=None, # optional region subset
+    lat_min=None, lat_max=None, # optional region subset
+    vars_to_keep=None,
+    pmin=None, pmax=None,
+):
+    """
+    Build a BGC SatGEM field using a USER-PROVIDED SSH/ADT dataset rather than Copernicus.
+
+    Parameters
+    ----------
+    ssh_source : str | Path | xr.Dataset | xr.DataArray
+        User SSH/ADT source. If str/Path, opened with xr.open_dataset().
+    gem_path : str | Path
+        Path or URL to combined seasonal GEM file.
+    lut_path : str | Path
+        Path or URL to LUT file containing dyn_m ↔ adt relationship for all longitudes.
+    ssh_var : str
+        Variable name inside ssh dataset to use (default "adt").
+    dates : tuple(str, str) or None
+        Optional (start, end) time subset; applied if SSH has a 'time' dimension.
+    lon_min, lon_max, lat_min, lat_max : float or None
+        Optional region subset; applied if SSH has longitude/latitude coords.
+    vars_to_keep : list[str] or None
+        Variables to retain from GEM. None keeps all.
+    pmin, pmax : float or None
+        Optional GEM pressure subsetting (dbar).
+
+    Returns
+    -------
+    satGEM_field : xr.Dataset or xr.DataArray
+        SatGEM field on the SSH grid (time, latitude, longitude, ... , pressure).
+    """
+
+    # ----------------------------
+    # 1) Load GEM + LUT (same as before)
+    # ----------------------------
+    gem_path = resolve_path(gem_path)
+    gem_all = xr.open_dataset(gem_path)
+
+    # Optional pressure subsetting on GEM
+    if (pmin is not None) or (pmax is not None):
+        if "pressure" in gem_all.coords:
+            pcoord = "pressure"
+        elif "pres" in gem_all.coords:
+            pcoord = "pres"
+        elif "p" in gem_all.coords:
+            pcoord = "p"
+        else:
+            raise ValueError(
+                "Could not find a pressure coordinate in GEM dataset "
+                "(expected 'pressure', 'pres', or 'p')."
+            )
+
+        pmin_ = pmin if pmin is not None else gem_all[pcoord].min().item()
+        pmax_ = pmax if pmax is not None else gem_all[pcoord].max().item()
+        gem_all = gem_all.sel({pcoord: slice(pmin_, pmax_)})
+
+    # Ensure GEM longitudes are in [-180, 180]
+    if "longitude" in gem_all.coords:
+        gem_all = gem_all.assign_coords(
+            longitude=np.vectorize(_to_180)(gem_all.longitude.values)
+        ).sortby("longitude")
+
+    lut_path = resolve_path(lut_path)
+    lut_all = xr.open_dataset(lut_path)
+
+    if "lon" in lut_all.coords and "longitude" not in lut_all.coords:
+        lut_all = lut_all.rename({"lon": "longitude"})
+
+    if "longitude" in lut_all.coords:
+        lut_all = lut_all.assign_coords(
+            longitude=np.vectorize(_to_180)(lut_all.longitude.values)
+        ).sortby("longitude")
+
+    # ----------------------------
+    # 2) Load user SSH/ADT
+    # ----------------------------
+    if isinstance(ssh_source, (str, Path)):
+        ssh_ds = xr.open_dataset(str(ssh_source))
+    elif isinstance(ssh_source, xr.DataArray):
+        ssh_da = ssh_source
+        ssh_ds = None
+    elif isinstance(ssh_source, xr.Dataset):
+        ssh_ds = ssh_source
+    else:
+        raise TypeError("ssh_source must be a path/URL, xr.Dataset, or xr.DataArray.")
+
+    if ssh_ds is not None:
+        if ssh_var not in ssh_ds:
+            raise KeyError(f"ssh_var='{ssh_var}' not found in the SSH dataset.")
+        ds_SO = ssh_ds[ssh_var]
+    else:
+        ds_SO = ssh_da
+
+    # Standardize coord names if needed (common alternatives)
+    rename_map = {}
+    if "lon" in ds_SO.coords and "longitude" not in ds_SO.coords:
+        rename_map["lon"] = "longitude"
+    if "lat" in ds_SO.coords and "latitude" not in ds_SO.coords:
+        rename_map["lat"] = "latitude"
+    if rename_map:
+        ds_SO = ds_SO.rename(rename_map)
+
+    # Optional time subset
+    if dates is not None and "time" in ds_SO.dims:
+        start_datetime, end_datetime = dates
+        ds_SO = ds_SO.sel(time=slice(start_datetime, end_datetime))
+
+    # Optional region subset
+    if ("longitude" in ds_SO.coords) and (lon_min is not None) and (lon_max is not None):
+        ds_SO = ds_SO.sel(longitude=slice(lon_min, lon_max))
+    if ("latitude" in ds_SO.coords) and (lat_min is not None) and (lat_max is not None):
+        ds_SO = ds_SO.sel(latitude=slice(lat_min, lat_max))
+
+    # ----------------------------
+    # 3) Group longitude columns into "posts" k = floor(lon_180)
+    # ----------------------------
+    if "longitude" not in ds_SO.coords:
+        raise ValueError("SSH data must have a 'longitude' coordinate (or 'lon').")
+    if "latitude" not in ds_SO.coords:
+        raise ValueError("SSH data must have a 'latitude' coordinate (or 'lat').")
+
+    cop_lons = ds_SO.longitude.values
+    cop_lons_180 = np.vectorize(_to_180)(cop_lons)
+    lon_keys = np.floor(cop_lons_180).astype(int)
+    unique_keys = np.unique(lon_keys)
+
+    tiles = []
+
+    # ----------------------------
+    # 4) Loop over each longitude post and sample
+    # ----------------------------
+    for k in tqdm(unique_keys, desc="Building BGC SatGEM (user SSH)"):
+        cols_mask = lon_keys == k
+        if not cols_mask.any():
+            continue
+
+        lon_subset = cop_lons[cols_mask]
+        cop_tile = ds_SO.sel(longitude=xr.DataArray(lon_subset, dims="longitude"))
+
+        month_da = None
+        if "time" in cop_tile.dims:
+            month_da = cop_tile["time"].dt.month
+
+        Gc = _open_gem_as_adt_nointerp(k, gem_all, lut_all, vars_to_keep, month_da=month_da)
+        Gw = _open_gem_as_adt_nointerp(_wrap180_int(k - 1), gem_all, lut_all, vars_to_keep, month_da=month_da)
+        Ge = _open_gem_as_adt_nointerp(_wrap180_int(k + 1), gem_all, lut_all, vars_to_keep, month_da=month_da)
+
+        if Gc is None and Gw is None and Ge is None:
+            continue
+
+        samples = []
+        weights = []
+
+        def _drop_scalar_lon(ds):
+            if "longitude" in ds.coords and "longitude" not in ds.dims:
+                ds = ds.reset_coords("longitude", drop=True)
+            return ds
+
+        if Gw is not None:
+            S_w = _drop_scalar_lon(Gw).sel(adt=cop_tile, method="nearest")
+            samples.append(S_w); weights.append(0.25)
+
+        if Gc is not None:
+            S_c = _drop_scalar_lon(Gc).sel(adt=cop_tile, method="nearest")
+            samples.append(S_c); weights.append(0.5)
+
+        if Ge is not None:
+            S_e = _drop_scalar_lon(Ge).sel(adt=cop_tile, method="nearest")
+            samples.append(S_e); weights.append(0.25)
+
+        w = np.array(weights, float)
+        w /= w.sum()
+
+        stacked = xr.concat(samples, dim="__m__")
+        sampled = (stacked * xr.DataArray(w, dims="__m__")).sum("__m__")
+
+        # Mask with SSH NaNs
+        sampled = sampled.where(np.isfinite(cop_tile))
+
+        sampled = sampled.assign_coords(
+            latitude=cop_tile.latitude,
+            longitude=cop_tile.longitude,
+        )
+
+        tiles.append(sampled)
+
+    # ----------------------------
+    # 5) Stitch tiles together
+    # ----------------------------
+    if len(tiles) == 0:
+        raise ValueError("No valid GEM tiles were produced – check paths and SSH grid/coords.")
+
+    satGEM_field = xr.concat(tiles, dim="longitude").sortby("longitude")
+    return satGEM_field
+
+
